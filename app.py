@@ -20,21 +20,54 @@ uploaded_transacciones = st.sidebar.file_uploader("2. Cargar 'Entradas y Salidas
 @st.cache_data
 def load_control_data(file):
     try:
-        # Detectar extensión para usar el motor correcto
+        # 1. Leemos el archivo sin encabezado primero para inspeccionar
         if file.name.endswith('.csv'):
-            # En tu archivo CSV, los encabezados reales parecen empezar tras algunas líneas vacías
-            # Ajustamos 'header' buscando la fila que contiene 'CODIGO DE PIEZA'
-            df = pd.read_csv(file, header=4) # Ajuste basado en tu archivo R-1899
+            df_raw = pd.read_csv(file, header=None)
         else:
-            df = pd.read_excel(file, header=4)
+            df_raw = pd.read_excel(file, header=None)
         
-        # Normalizar nombres de columnas (quitar espacios extra, mayúsculas)
+        # 2. Buscamos automáticamente en qué fila está la columna "CODIGO DE PIEZA"
+        header_row_index = None
+        for i, row in df_raw.iterrows():
+            # Convertimos la fila a texto y buscamos la palabra clave
+            row_str = row.astype(str).str.upper().str.strip()
+            if row_str.str.contains('CODIGO DE PIEZA').any() or row_str.str.contains('CÓDIGO DE PIEZA').any():
+                header_row_index = i
+                break
+        
+        if header_row_index is None:
+            st.error("Error Crítico: No se encontró la fila de encabezados que contenga 'CODIGO DE PIEZA'. Verifica el archivo.")
+            return None
+
+        # 3. Recargamos el archivo usando la fila encontrada como encabezado
+        if file.name.endswith('.csv'):
+            df = pd.read_csv(file, header=header_row_index)
+        else:
+            df = pd.read_excel(file, header=header_row_index)
+            
+        # Normalizar nombres de columnas
         df.columns = df.columns.str.strip().str.upper()
         
-        # Verificar columna clave
+        # Verificar nuevamente por seguridad
         if 'CODIGO DE PIEZA' not in df.columns:
-            st.error("Error: No se encontró la columna 'CODIGO DE PIEZA' en el archivo de Control.")
+            st.error(f"Error: Se detectó el encabezado en la fila {header_row_index}, pero la columna no se llama exactamente 'CODIGO DE PIEZA'. Columnas encontradas: {list(df.columns)}")
             return None
+            
+        # Limpieza básica
+        df = df.dropna(subset=['CODIGO DE PIEZA'])
+        df['CANT ITEM S.C.'] = pd.to_numeric(df['CANT ITEM S.C.'], errors='coerce').fillna(0)
+        
+        # Agrupar por código
+        df_grouped = df.groupby('CODIGO DE PIEZA').agg({
+            'DESCRIPCION DE LA PARTIDA': 'first',
+            'CANT ITEM S.C.': 'sum'
+        }).reset_index()
+        
+        return df_grouped
+
+    except Exception as e:
+        st.error(f"Error al procesar Control de Materiales: {e}")
+        return None
             
         # Limpieza básica
         df = df.dropna(subset=['CODIGO DE PIEZA'])
@@ -201,3 +234,4 @@ if uploaded_control and uploaded_transacciones:
 
 else:
     st.info("👋 Esperando archivos. Por favor carga el 'Control de Materiales' y 'Entradas y Salidas' en el panel lateral.")
+
