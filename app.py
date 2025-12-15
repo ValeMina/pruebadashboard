@@ -1,181 +1,222 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
-from datetime import datetime
+import datetime
+import os
+import json
 
 # --- CONFIGURACIÓN DE LA PÁGINA ---
-st.set_page_config(
-    page_title="Tablero de Control Logístico - Naval",
-    page_icon="⚓",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title="Panel de Informes de Materiales", layout="wide")
 
-# --- ESTILOS CSS PERSONALIZADOS ---
+# Archivo para guardar los datos persistentemente (simulando LocalStorage)
+DB_FILE = "db_proyectos.json"
+
+# --- FUNCIONES DE PERSISTENCIA (GUARDAR DATOS) ---
+def cargar_datos():
+    if os.path.exists(DB_FILE):
+        try:
+            with open(DB_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            return []
+    return []
+
+def guardar_datos(lista_proyectos):
+    with open(DB_FILE, "w", encoding="utf-8") as f:
+        json.dump(lista_proyectos, f, default=str)
+
+# Inicializar estado de la sesión
+if 'proyectos' not in st.session_state:
+    st.session_state.proyectos = cargar_datos()
+
+# --- LÓGICA DE PROCESAMIENTO (REPLICANDO TU JS) ---
+def procesar_excel(df):
+    """
+    Replica la función 'generarResumenEjecutivo' de tu Script JS.
+    """
+    # Normalizar nombres de columnas (quitar espacios extra y mayúsculas)
+    df.columns = [str(c).strip().upper() for c in df.columns]
+    
+    # KPIs Básicos
+    total_registros = len(df)
+    
+    # Suma de Cantidad Disponible (manejo de errores si no es número)
+    if "CANT DISPONIBLE" in df.columns:
+        total_disponible = pd.to_numeric(df["CANT DISPONIBLE"], errors='coerce').fillna(0).sum()
+    else:
+        total_disponible = 0
+
+    # Conteos de Estatus
+    conteo_sc = df["ESTATUS S.C."].value_counts().to_dict() if "ESTATUS S.C." in df.columns else {}
+    conteo_oc = df["ESTATUS O.C."].value_counts().to_dict() if "ESTATUS O.C." in df.columns else {}
+
+    # Lógica de Materiales Críticos
+    # Critico si: Cancelado OR (Prometida Vencida AND Sin fecha llegada)
+    criticos = []
+    
+    # Aseguramos formato fecha
+    hoy = pd.Timestamp.now()
+    
+    # Copia para trabajar fechas sin alertas
+    df_proc = df.copy()
+    
+    cols_fecha = ["FECHA PROMETIDA", "FECHA DE LLEGADA"]
+    for col in cols_fecha:
+        if col in df_proc.columns:
+            df_proc[col] = pd.to_datetime(df_proc[col], errors='coerce')
+
+    if "FECHA PROMETIDA" in df_proc.columns and "FECHA DE LLEGADA" in df_proc.columns:
+        for index, row in df_proc.iterrows():
+            est_sc = str(row.get("ESTATUS S.C.", "")).upper()
+            est_oc = str(row.get("ESTATUS O.C.", "")).upper()
+            
+            es_cancelado = ("CANCELADA" in est_sc) or ("CANCELADA" in est_oc)
+            
+            fecha_prom = row["FECHA PROMETIDA"]
+            fecha_lleg = row["FECHA DE LLEGADA"]
+            
+            # Lógica JS: prometidoVencido && sinLlegada
+            vencido = False
+            if pd.notnull(fecha_prom) and pd.isnull(fecha_lleg):
+                if fecha_prom < hoy:
+                    vencido = True
+            
+            if es_cancelado or vencido:
+                criticos.append({
+                    "No. S.C.": row.get("NO. S.C.", "-"),
+                    "Titulo": row.get("TITULO DE LA REQUISICION", "Sin título"),
+                    "Estatus SC": est_sc,
+                    "Prometida": row["FECHA PROMETIDA"].strftime('%d/%m/%Y') if pd.notnull(row["FECHA PROMETIDA"]) else "-",
+                    "Motivo": "CANCELADA" if es_cancelado else "VENCIDA"
+                })
+
+    return {
+        "total_registros": total_registros,
+        "total_disponible": total_disponible,
+        "conteo_sc": conteo_sc,
+        "conteo_oc": conteo_oc,
+        "criticos": criticos
+    }
+
+# --- INTERFAZ GRÁFICA ---
+
+# Estilos CSS personalizados para parecerse a tu HTML original
 st.markdown("""
     <style>
-    .big-font { font-size:20px !important; font-weight: bold; }
-    .metric-card { background-color: #f0f2f6; padding: 15px; border-radius: 10px; border-left: 5px solid #1f77b4; }
+    .big-font { font-size:20px !important; font-weight: bold; color: #1f4e79; }
+    .header-style { background-color: #1f4e79; color: white; padding: 10px; border-radius: 5px; }
+    div[data-testid="stMetricValue"] { font-size: 24px; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- FUNCIONES DE CARGA Y LIMPIEZA ---
-@st.cache_data
-def load_data(uploaded_file):
-    try:
-        # Intentamos leer buscando el encabezado correcto. 
-        # En tu archivo, los encabezados reales parecen empezar donde está "No. S.C."
-        df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
-        
-        # Búsqueda dinámica del encabezado si el archivo tiene filas vacías al inicio
-        if 'No. S.C.' not in df.columns:
-            # Buscar en las primeras 10 filas dónde está el encabezado
-            for i in range(10):
-                df_temp = pd.read_csv(uploaded_file, header=i) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file, header=i)
-                if 'No. S.C.' in df_temp.columns:
-                    df = df_temp
-                    break
-        
-        # Limpieza de fechas
-        date_cols = ['FECHA PROMETIDA', 'FECHA DE LLEGADA', 'FECHA REP MCC']
-        for col in date_cols:
-            if col in df.columns:
-                df[col] = pd.to_datetime(df[col], errors='coerce')
+# Encabezado
+st.markdown('<div class="header-style"><h1>📋 Informe Ejecutivo de Control de Materiales</h1></div>', unsafe_allow_html=True)
+st.write("")
 
-        return df
-    except Exception as e:
-        st.error(f"Error al procesar el archivo: {e}")
-        return None
-
-# --- SIDEBAR: ADMINISTRADOR ---
+# --- SIDEBAR: PANEL DE ADMINISTRACIÓN ---
 with st.sidebar:
-    st.image("https://img.icons8.com/ios-filled/100/1f77b4/cargo-ship.png", width=50)
-    st.title("Admin Panel")
+    st.header("⚙️ Panel de Administración")
     
-    # Simulación de Login Simple
-    password = st.text_input("Contraseña de Admin", type="password")
+    # Input de contraseña (replicando tu JS)
+    password = st.text_input("Clave de Administrador", type="password")
     
-    uploaded_file = None
-    if password == "admin123":  # Contraseña ejemplo
-        st.success("Acceso Concedido")
+    if password == "1234":
+        st.success("🔓 Acceso Concedido")
         st.markdown("---")
-        st.subheader("📂 Cargar Control de Materiales")
-        uploaded_file = st.file_uploader("Sube tu Excel o CSV aquí", type=['xlsx', 'csv'])
-    elif password:
-        st.error("Contraseña incorrecta")
+        st.subheader("Subir Nuevo Proyecto")
+        
+        nuevo_nombre = st.text_input("Nombre del Proyecto (Ej. R-1916)")
+        nuevo_archivo = st.file_uploader("Cargar Excel (.xlsx)", type=["xlsx"])
+        
+        if st.button("Procesar y Guardar"):
+            if nuevo_nombre and nuevo_archivo:
+                try:
+                    df = pd.read_excel(nuevo_archivo)
+                    resumen = procesar_excel(df)
+                    
+                    nuevo_proyecto = {
+                        "id": f"proj_{datetime.datetime.now().timestamp()}",
+                        "nombre": nuevo_nombre,
+                        "resumen": resumen
+                    }
+                    
+                    st.session_state.proyectos.append(nuevo_proyecto)
+                    guardar_datos(st.session_state.proyectos) # Guardar en JSON
+                    st.success(f"Proyecto '{nuevo_nombre}' guardado éxito.")
+                    st.rerun() # Recargar para actualizar lista
+                except Exception as e:
+                    st.error(f"Error al leer el Excel: {e}")
+            else:
+                st.warning("Falta nombre o archivo.")
+        
+        st.markdown("---")
+        st.subheader("Gestionar Proyectos")
+        if st.session_state.proyectos:
+            df_proys = pd.DataFrame(st.session_state.proyectos)
+            st.dataframe(df_proys[["nombre"]], hide_index=True)
+            
+            if st.button("🗑️ Eliminar TODOS los proyectos", type="primary"):
+                st.session_state.proyectos = []
+                guardar_datos([])
+                st.rerun()
+        else:
+            st.info("No hay proyectos cargados.")
+            
     else:
-        st.info("Ingresa la contraseña para cargar datos.")
+        if password:
+            st.error("Clave incorrecta")
+        st.info("Introduce la clave para cargar o borrar proyectos.")
 
-    st.markdown("---")
-    st.caption("Sistema de Gestión de Astillero v2.0")
+# --- ZONA PÚBLICA (MAIN) ---
 
-# --- ÁREA PRINCIPAL ---
-
-if uploaded_file is not None:
-    df = load_data(uploaded_file)
-    
-    if df is not None:
-        # --- PROCESAMIENTO DE KPIS ---
-        # Filtros básicos derivados de tu archivo
-        total_items = len(df)
-        recibidos = df[df['ESTATUS GRN'] == 'RECV'].shape[0]
-        cancelados = df[df['ESTATUS O.C.'] == 'CANCELADA'].shape[0] # Ajustado según tu data
-        pendientes = total_items - recibidos - cancelados
-        pct_avance = (recibidos / (total_items - cancelados)) * 100 if (total_items - cancelados) > 0 else 0
-        
-        # Cálculo de Tiempos (Días de Retraso)
-        if 'FECHA PROMETIDA' in df.columns and 'FECHA DE LLEGADA' in df.columns:
-            df['Dias_Retraso'] = (df['FECHA DE LLEGADA'] - df['FECHA PROMETIDA']).dt.days
-            # Consideramos "A tiempo" si llegó antes o el mismo día (<= 0)
-            a_tiempo = df[df['Dias_Retraso'] <= 0].shape[0]
-            con_retraso = df[df['Dias_Retraso'] > 0].shape[0]
-            # Solo consideramos items que ya llegaron para el KPI de eficiencia
-            items_con_fecha = df.dropna(subset=['FECHA DE LLEGADA'])
-            otd_rate = (a_tiempo / len(items_con_fecha)) * 100 if len(items_con_fecha) > 0 else 0
-        
-        st.title(f"⚓ Dashboard Ejecutivo: {df['NOMBRE DEL PROYECTO'].iloc[0] if 'NOMBRE DEL PROYECTO' in df.columns else 'Control de Materiales'}")
-        st.markdown("Vista de alto nivel del estatus de la cadena de suministro.")
-
-        # --- FILA 1: METRICAS CLAVE (KPIs) ---
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            st.metric(label="Total Solicitudes (Items)", value=total_items)
-        with col2:
-            st.metric(label="Material Recibido", value=recibidos, delta=f"{pct_avance:.1f}% Completado")
-        with col3:
-            st.metric(label="Eficiencia Entrega (OTD)", value=f"{otd_rate:.1f}%", delta_color="inverse" if otd_rate < 80 else "normal")
-        with col4:
-            st.metric(label="Pendientes Críticos", value=pendientes, delta_color="off")
-
-        st.markdown("---")
-
-        # --- TABS PARA VISTAS DETALLADAS ---
-        tab1, tab2, tab3 = st.tabs(["📊 Análisis Gráfico", "⏱️ Tiempos de Entrega", "📋 Base de Datos"])
-
-        with tab1:
-            c1, c2 = st.columns(2)
-            
-            with c1:
-                st.subheader("Estatus de Materiales")
-                # Gráfico de Dona para Estatus
-                status_counts = df['ESTATUS GRN'].fillna('PENDIENTE').value_counts().reset_index()
-                status_counts.columns = ['Estatus', 'Cantidad']
-                fig_pie = px.pie(status_counts, values='Cantidad', names='Estatus', hole=0.4, 
-                                 color_discrete_sequence=px.colors.sequential.RdBu)
-                st.plotly_chart(fig_pie, use_container_width=True)
-
-            with c2:
-                st.subheader("Top Materiales Solicitados")
-                # Extraemos palabras clave o usamos la descripción
-                if 'DESCRIPCION DE LA PARTIDA' in df.columns:
-                    # Contamos frecuencia de descripciones
-                    top_mats = df['DESCRIPCION DE LA PARTIDA'].value_counts().head(10).sort_values(ascending=True)
-                    fig_bar = px.bar(top_mats, orientation='h', title="Top 10 Items más frecuentes")
-                    fig_bar.update_layout(xaxis_title="Cantidad", yaxis_title="Material")
-                    st.plotly_chart(fig_bar, use_container_width=True)
-
-        with tab2:
-            st.subheader("Análisis de Cumplimiento de Fechas")
-            
-            if 'FECHA PROMETIDA' in df.columns and 'FECHA DE LLEGADA' in df.columns:
-                # Scatter plot comparativo
-                df_dates = df.dropna(subset=['FECHA PROMETIDA', 'FECHA DE LLEGADA']).copy()
-                fig_scatter = px.scatter(df_dates, x='FECHA PROMETIDA', y='FECHA DE LLEGADA', 
-                                         color='Dias_Retraso',
-                                         hover_data=['DESCRIPCION DE LA PARTIDA', 'No. S.C.'],
-                                         title="Fecha Prometida vs. Fecha Real de Llegada",
-                                         labels={'Dias_Retraso': 'Días de Retraso'},
-                                         color_continuous_scale='RdYlGn_r') # Verde bueno, Rojo retraso
-                
-                # Línea de referencia (lo ideal es x=y)
-                fig_scatter.add_shape(type="line",
-                    x0=df_dates['FECHA PROMETIDA'].min(), y0=df_dates['FECHA PROMETIDA'].min(),
-                    x1=df_dates['FECHA PROMETIDA'].max(), y1=df_dates['FECHA PROMETIDA'].max(),
-                    line=dict(color="Gray", width=2, dash="dash"),
-                )
-                st.plotly_chart(fig_scatter, use_container_width=True)
-                
-                st.info("💡 Nota: Los puntos por encima de la línea punteada representan entregas tardías. El color indica la gravedad del retraso.")
-
-        with tab3:
-            st.subheader("Detalle de Registros")
-            # Filtros interactivos simples
-            search = st.text_input("🔍 Buscar por descripción o código de pieza:")
-            
-            df_display = df.copy()
-            if search:
-                df_display = df_display[df_display.apply(lambda row: row.astype(str).str.contains(search, case=False).any(), axis=1)]
-            
-            st.dataframe(df_display, use_container_width=True)
-
+# Selector de Proyecto
+if not st.session_state.proyectos:
+    st.info("👋 No hay proyectos cargados. Por favor, usa el panel de administración (izquierda) para subir uno.")
 else:
-    # Pantalla de bienvenida cuando no hay archivo
-    st.markdown("""
-    <div style='text-align: center; padding: 50px;'>
-        <h1>Bienvenido al Sistema de Control Logístico</h1>
-        <p>Por favor, ingrese como administrador en el menú lateral para cargar el archivo de control de materiales.</p>
-        <p style='color: gray;'>Esperando carga de datos...</p>
-    </div>
-    """, unsafe_allow_html=True)
+    nombres_proyectos = [p["nombre"] for p in st.session_state.proyectos]
+    seleccion = st.selectbox("📂 Seleccione un proyecto:", nombres_proyectos)
+    
+    # Buscar datos del proyecto seleccionado
+    proyecto_actual = next((p for p in st.session_state.proyectos if p["nombre"] == seleccion), None)
+    
+    if proyecto_actual:
+        r = proyecto_actual["resumen"]
+        
+        st.markdown("---")
+        st.markdown(f"<div class='big-font'>Resumen: {proyecto_actual['nombre']}</div>", unsafe_allow_html=True)
+        
+        # 1. Métricas Principales (Tarjetas)
+        col1, col2 = st.columns(2)
+        col1.metric("Total de Partidas", r["total_registros"])
+        col2.metric("Cantidad Disponible", f"{r['total_disponible']:,.2f}")
+        
+        st.markdown("---")
+        
+        # 2. Gráficos de Estatus (Reemplaza las listas de texto del HTML)
+        c1, c2 = st.columns(2)
+        
+        with c1:
+            st.subheader("Estatus S.C.")
+            if r["conteo_sc"]:
+                df_sc = pd.DataFrame(list(r["conteo_sc"].items()), columns=["Estatus", "Cantidad"])
+                st.dataframe(df_sc, use_container_width=True, hide_index=True)
+            else:
+                st.info("Sin datos de S.C.")
+
+        with c2:
+            st.subheader("Estatus O.C.")
+            if r["conteo_oc"]:
+                df_oc = pd.DataFrame(list(r["conteo_oc"].items()), columns=["Estatus", "Cantidad"])
+                st.dataframe(df_oc, use_container_width=True, hide_index=True)
+            else:
+                st.info("Sin datos de O.C.")
+
+        # 3. Materiales Críticos
+        st.markdown("---")
+        st.subheader("🚨 Materiales Críticos (Cancelados o Vencidos)")
+        
+        criticos = r["criticos"]
+        if criticos:
+            # Mostrar tabla bonita
+            st.dataframe(pd.DataFrame(criticos), use_container_width=True)
+        else:
+            st.success("✅ ¡Excelente! No se detectaron materiales críticos con la lógica actual.")
